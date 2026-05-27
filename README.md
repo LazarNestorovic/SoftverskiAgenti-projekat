@@ -1,0 +1,1 @@
+Softverski agenti - Predikcija cena nekretnina
