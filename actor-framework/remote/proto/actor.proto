@@ -1,0 +1,32 @@
+syntax = "proto3";
+package remote;
+option go_package = "agentskiSistemi/actor-framework/remote";
+
+service ActorService {
+    rpc Tell(RemoteMessage) returns (Ack);
+    rpc Ask(RemoteMessage) returns (RemoteMessage);
+    rpc Gossip(GossipProto) returns (Ack);
+}
+
+message RemoteMessage {
+    string actor_id = 1;
+    string type_name = 2;
+    bytes payload = 3;
+}
+
+message Ack {
+    bool success = 1;
+    string error = 2;
+}
+
+message GossipProto {
+    string sender_id = 1;
+    repeated NodeInfo members = 2;
+}
+
+message NodeInfo {
+    string node_id = 1;
+    string address = 2;
+    int32 status = 3;
+    int64 version = 4;
+}
