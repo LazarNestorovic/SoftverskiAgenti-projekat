@@ -2,6 +2,7 @@ package actor
 
 import (
 	"agentskiSistemi/actor-framework/supervision"
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,7 +27,7 @@ type BehaviorFunc func(ctx ActorContext, msg Message)
 type ActorRef interface {
 	ID() ActorID
 	Tell(msg Message)
-	Ask(ctx ActorContext, msg Message, timeout time.Duration) (Message, error)
+	Ask(ctx context.Context, msg Message, timeout time.Duration) (Message, error)
 	Stop()
 }
 

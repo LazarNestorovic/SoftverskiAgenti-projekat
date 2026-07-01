@@ -2,6 +2,7 @@ package actor
 
 import (
 	"agentskiSistemi/actor-framework/supervision"
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -340,7 +341,7 @@ func (l *localActorRef) Stop() {
 	}
 }
 
-func (l *localActorRef) Ask(context ActorContext, msg Message, timeout time.Duration) (Message, error) {
+func (l *localActorRef) Ask(ctx context.Context, msg Message, timeout time.Duration) (Message, error) {
 	replyCh := make(chan Message, 1)
 	l.mailbox.Enqueue(&askEnvelope{Payload: msg, ReplyTo: replyCh})
 	select {
