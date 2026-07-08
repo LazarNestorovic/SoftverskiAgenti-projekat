@@ -99,3 +99,7 @@ func (c *CoordinatorActor) startRound(ctx actor.ActorContext) {
 		})
 	}
 }
+
+func (c *CoordinatorActor) GetGlobalModel() *model.LinearModel {
+	return c.globalModel
+}
