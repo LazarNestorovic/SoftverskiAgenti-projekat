@@ -1,0 +1,12 @@
+federated_learning:
+  num_clients: 3
+  num_rounds: 100
+  learning_rate: 0.05
+  epochs: 20
+  convergence_threshold: 0.15
+  partition_mode: "iid"      # iid | non_iid
+  num_clusters: 2            # za ClusterManagerActor
+
+dataset:
+  path: "../housing.csv"
+  validation_split: 0.2
