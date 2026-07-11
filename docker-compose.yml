@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+
+  # ── Lokalna demonstracija — svi akteri u jednom kontejneru ──────────────────
+  fl-local:
+    build: .
+    container_name: fl-local
+    volumes:
+      - ./housing.csv:/app/housing.csv:ro
+      - ./demo/config.yaml:/app/config.yaml:ro
+    environment:
+      - GOGC=100
+    profiles:
+      - local
+
+  # ── Višemašinska demonstracija — koordinator + 3 klijenta ──────────────────
+
+  coordinator:
+    build: .
+    container_name: fl-coordinator
+    command: ["./fl-demo", "--config=config.yaml", "--mode=coordinator"]
+    ports:
+      - "50051:50051"   # gRPC port za komunikaciju sa klijentima
+    volumes:
+      - ./housing.csv:/app/housing.csv:ro
+      - ./demo/config.yaml:/app/demo/config.yaml:ro
+    networks:
+      - fl-net
+    profiles:
+      - distributed
+
+  client-1:
+    build: .
+    container_name: fl-client-1
+    command: ["./fl-demo", "--config=config.yaml", "--mode=client", "--id=client-1", "--coordinator=coordinator:50051"]
+    volumes:
+      - ./housing.csv:/app/housing.csv:ro
+      - ./demo/config.yaml:/app/config.yaml:ro
+    depends_on:
+      - coordinator
+    networks:
+      - fl-net
+    profiles:
+      - distributed
+
+  client-2:
+    build: .
+    container_name: fl-client-2
+    command: ["./fl-demo", "--config=config.yaml", "--mode=client", "--id=client-2", "--coordinator=coordinator:50051"]
+    volumes:
+      - ./housing.csv:/app/housing.csv:ro
+      - ./demo/config.yaml:/app/config.yaml:ro
+    depends_on:
+      - coordinator
+    networks:
+      - fl-net
+    profiles:
+      - distributed
+
+  client-3:
+    build: .
+    container_name: fl-client-3
+    command: ["./fl-demo", "--config=config.yaml", "--mode=client", "--id=client-3", "--coordinator=coordinator:50051"]
+    volumes:
+      - ./housing.csv:/app/housing.csv:ro
+      - ./demo/config.yaml:/app/config.yaml:ro
+    depends_on:
+      - coordinator
+    networks:
+      - fl-net
+    profiles:
+      - distributed
+
+networks:
+  fl-net:
+    driver: bridge
