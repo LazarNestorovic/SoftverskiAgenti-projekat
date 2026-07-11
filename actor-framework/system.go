@@ -92,7 +92,10 @@ func (s *ActorSystem) SpawnWithSupervisor(a Actor, name string, supervisor *supe
 }
 
 func (s *ActorSystem) spawnChildWithSupervisor(a Actor, name string, parent ActorRef, supervisor *supervision.Supervisor) ActorRef {
-	id := NewActorId()
+	id := ActorID(name)
+	if name == "" {
+		id = NewActorId()
+	}
 	mailbox := NewMailbox(MailboxConfig{Capacity: 100, Priority: nil})
 	ref := &localActorRef{id, mailbox, s}
 	ctx := newActorContext(ref, parent, s)
@@ -129,7 +132,10 @@ func addChildToParentList(parentCell *actorCell, ref ActorRef) {
 }
 
 func (s *ActorSystem) spawnChild(a Actor, name string, parent ActorRef) ActorRef {
-	id := NewActorId()
+	id := ActorID(name)
+	if name == "" {
+		id = NewActorId()
+	}
 	mailbox := NewMailbox(MailboxConfig{Capacity: 100, Priority: nil})
 	ref := &localActorRef{id, mailbox, s}
 	ctx := newActorContext(ref, parent, s)

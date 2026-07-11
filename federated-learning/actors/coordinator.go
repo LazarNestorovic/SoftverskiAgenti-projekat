@@ -3,10 +3,18 @@ package actors
 import (
 	"agentskiSistemi/actor-framework"
 	"agentskiSistemi/actor-framework/crdt"
+	"agentskiSistemi/actor-framework/remote"
 	"agentskiSistemi/federated-learning/model"
 	"fmt"
 	"time"
 )
+
+func init() {
+	remote.DefaultRegistry.Register(ClientJoin{})
+	remote.DefaultRegistry.Register(StartRound{})
+	remote.DefaultRegistry.Register(LocalUpdate{})
+	remote.DefaultRegistry.Register(ClusterAssign{})
+}
 
 type CoordinatorConfig struct {
 	TotalRounds  int
@@ -16,23 +24,26 @@ type CoordinatorConfig struct {
 }
 
 type CoordinatorActor struct {
-	cfg          CoordinatorConfig
-	globalModel  *model.LinearModel
-	clients      []actor.ActorRef
-	aggregator   actor.ActorRef
-	monitor      actor.ActorRef
-	currentRound int
-	roundStart   time.Time
-	roundCounter *crdt.GCounter
-	clientSet    *crdt.ORSet[string]
+	cfg            CoordinatorConfig
+	globalModel    *model.LinearModel
+	clients        []actor.ActorRef
+	aggregator     actor.ActorRef
+	monitor        actor.ActorRef
+	clusterManager actor.ActorRef
+	remoteClient   *remote.RemoteClient
+	currentRound   int
+	roundStart     time.Time
+	roundCounter   *crdt.GCounter
+	clientSet      *crdt.ORSet[string]
 }
 
-func NewCoordinatorActor(cfg CoordinatorConfig, numFeatures int) *CoordinatorActor {
+func NewCoordinatorActor(cfg CoordinatorConfig, numFeatures int, remoteClient *remote.RemoteClient) *CoordinatorActor {
 	return &CoordinatorActor{
 		cfg:          cfg,
 		globalModel:  model.New(numFeatures),
 		roundCounter: crdt.NewGCounter("coordinator"),
 		clientSet:    crdt.NewORSet[string](),
+		remoteClient: remoteClient,
 	}
 }
 
@@ -72,6 +83,21 @@ func (c *CoordinatorActor) Receive(ctx actor.ActorContext, msg actor.Message) {
 		c.startRound(ctx)
 	case actor.ActorFailed:
 		fmt.Printf("[Coordinator] aktor %s pao: %s\n", m.ActorID, m.ErrMsg)
+	case SetPeers:
+		c.aggregator = m.Aggregator
+		c.monitor = m.Monitor
+		c.clusterManager = m.ClusterManager
+	case ClientJoin:
+		ref := remote.NewRemoteActorRef(actor.ActorID(m.ClientID), m.Address, c.remoteClient)
+		c.clients = append(c.clients, ref)
+		c.clientSet.Add(m.ClientID)
+		fmt.Printf("[Coordinator] klijent %s se registrovao (%s)\n", m.ClientID, m.Address)
+		if c.clusterManager != nil {
+			ctx.Send(c.clusterManager, RegisterClient{Ref: ref, FeatureMean: m.FeatureMean, ExpectedTotal: m.ExpectedTotal})
+		}
+		if len(c.clients) >= m.ExpectedTotal {
+			c.startRound(ctx)
+		}
 	}
 }
 

@@ -6,10 +6,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
 	actor "agentskiSistemi/actor-framework"
+	"agentskiSistemi/actor-framework/remote"
 	flactors "agentskiSistemi/federated-learning/actors"
 	"agentskiSistemi/federated-learning/data"
 	"agentskiSistemi/federated-learning/model"
@@ -17,6 +20,11 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "demo/config.yaml", "putanja do config.yaml")
+	mode := flag.String("mode", "local", "režim rada: local | coordinator | client")
+	id := flag.String("id", "", "ID klijenta (mode=client)")
+	coordinatorAddr := flag.String("coordinator", "", "gRPC adresa koordinatora, npr. coordinator:50051 (mode=client)")
+	listenAddr := flag.String("listen", ":50051", "gRPC adresa na kojoj koordinator sluša (mode=coordinator)")
+	clientPort := flag.String("client-port", ":50060", "gRPC port na kome klijent sluša (mode=client)")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
@@ -24,7 +32,14 @@ func main() {
 		log.Fatalf("greška učitavanja konfiguracije: %v", err)
 	}
 
-	runLocal(cfg)
+	switch *mode {
+	case "coordinator":
+		runCoordinator(cfg, *listenAddr)
+	case "client":
+		runClient(cfg, *id, *coordinatorAddr, *clientPort)
+	default:
+		runLocal(cfg)
+	}
 }
 
 func runLocal(cfg *Config) {
@@ -63,7 +78,7 @@ func runLocal(cfg *Config) {
 		Epochs:       cfg.FL.Epochs,
 		DoneCh:       doneCh,
 	}
-	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures)
+	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures, nil)
 	coordinatorRef := sys.Spawn(
 		coordActor,
 		"coordinator",
@@ -134,6 +149,147 @@ func runLocal(cfg *Config) {
 
 	sys.Shutdown()
 	fmt.Println("Sistem zaustavljen.")
+}
+
+// runCoordinator pokreće koordinatorski proces distribuiranog FL treninga:
+// hostuje CoordinatorActor/AggregatorActor/MonitorActor/ClusterManagerActor
+// i čeka da se klijenti (u odvojenim procesima) registruju preko gRPC-a.
+func runCoordinator(cfg *Config, listenAddr string) {
+	samples, err := data.Load(cfg.Dataset.Path)
+	if err != nil {
+		log.Fatalf("greška učitavanja dataseta: %v", err)
+	}
+	fmt.Printf("Učitano %d uzoraka iz %s\n", len(samples), cfg.Dataset.Path)
+
+	mins, maxs, minTarget, maxTarget := data.Normalize(samples)
+
+	splitIdx := int(float64(len(samples)) * (1 - cfg.Dataset.ValidationSplit))
+	valSamples := samples[splitIdx:]
+	valX, valY := data.ToMatrices(valSamples)
+
+	sys := actor.NewActorSystem("coordinator")
+	doneCh := make(chan struct{})
+	remoteClient := remote.NewRemoteClient(nil)
+
+	coordCfg := flactors.CoordinatorConfig{
+		TotalRounds:  cfg.FL.NumRounds,
+		LearningRate: cfg.FL.LearningRate,
+		Epochs:       cfg.FL.Epochs,
+		DoneCh:       doneCh,
+	}
+	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures, remoteClient)
+	coordinatorRef := sys.Spawn(coordActor, "coordinator")
+
+	aggregatorRef := sys.Spawn(flactors.NewAggregatorActor(coordinatorRef, cfg.FL.NumClients), "aggregator")
+	monitorRef := sys.Spawn(flactors.NewMonitorActor(coordinatorRef, valX, valY, cfg.FL.ConvergenceThreshold), "monitor")
+	clusterMgrRef := sys.Spawn(flactors.NewClusterManagerActor(cfg.FL.NumClusters), "cluster-manager")
+
+	time.Sleep(100 * time.Millisecond) // daj aktorima da završe OnStart
+	coordinatorRef.Tell(flactors.SetPeers{Aggregator: aggregatorRef, Monitor: monitorRef, ClusterManager: clusterMgrRef})
+
+	server := remote.NewRemoteServer(sys)
+	if err := server.Start(listenAddr); err != nil {
+		log.Fatalf("greška pokretanja gRPC servera: %v", err)
+	}
+	fmt.Printf("[Coordinator] gRPC server sluša na %s, čekam %d klijenata...\n", listenAddr, cfg.FL.NumClients)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case <-doneCh:
+		fmt.Println("\nFL trening završen.")
+		runPredictionDemo(coordActor.GetGlobalModel(), mins, maxs, minTarget, maxTarget)
+	case <-sig:
+		fmt.Println("\nPrimljen signal za zaustavljanje.")
+	}
+
+	server.Stop()
+	sys.Shutdown()
+	fmt.Println("Sistem zaustavljen.")
+}
+
+var clientIndexRe = regexp.MustCompile(`(\d+)$`)
+
+// runClient pokreće klijentski proces distribuiranog FL treninga: učitava
+// istu particiju podataka koju bi runLocal dodelio ovom klijentu, i
+// registruje se kod koordinatora preko gRPC-a.
+func runClient(cfg *Config, id string, coordinatorAddr string, listenPort string) {
+	if id == "" {
+		log.Fatal("--id je obavezan u mode=client")
+	}
+	if coordinatorAddr == "" {
+		log.Fatal("--coordinator je obavezan u mode=client")
+	}
+
+	match := clientIndexRe.FindStringSubmatch(id)
+	if match == nil {
+		log.Fatalf("ne mogu da izvučem indeks klijenta iz --id=%s (očekivan format client-N)", id)
+	}
+	num, _ := strconv.Atoi(match[1])
+	clientIndex := num - 1
+
+	samples, err := data.Load(cfg.Dataset.Path)
+	if err != nil {
+		log.Fatalf("greška učitavanja dataseta: %v", err)
+	}
+	data.Normalize(samples)
+
+	splitIdx := int(float64(len(samples)) * (1 - cfg.Dataset.ValidationSplit))
+	trainSamples := samples[:splitIdx]
+
+	mode := data.IID
+	if cfg.FL.PartitionMode == "non_iid" {
+		mode = data.NonIID
+	}
+	partitions := data.Partition(trainSamples, cfg.FL.NumClients, data.PartitionMode(mode))
+	if clientIndex < 0 || clientIndex >= len(partitions) {
+		log.Fatalf("indeks klijenta %d van opsega (num_clients=%d)", clientIndex, len(partitions))
+	}
+	X, y := data.ToMatrices(partitions[clientIndex])
+	fmt.Printf("[%s] particija: %d uzoraka\n", id, len(X))
+
+	sys := actor.NewActorSystem(id)
+	remoteClient := remote.NewRemoteClient(nil)
+	aggregatorRef := remote.NewRemoteActorRef(actor.ActorID("aggregator"), coordinatorAddr, remoteClient)
+	sys.Spawn(flactors.NewClientActor(id, X, y, aggregatorRef), id)
+
+	server := remote.NewRemoteServer(sys)
+	if err := server.Start(listenPort); err != nil {
+		log.Fatalf("greška pokretanja gRPC servera: %v", err)
+	}
+	advertiseAddr := id + listenPort
+
+	time.Sleep(100 * time.Millisecond) // daj ClientActor-u da završi OnStart
+
+	fmt.Printf("[%s] registrujem se kod koordinatora %s (adresa: %s)\n", id, coordinatorAddr, advertiseAddr)
+	joinMsg := flactors.ClientJoin{
+		ClientID:      id,
+		Address:       advertiseAddr,
+		FeatureMean:   featureMean(X),
+		ExpectedTotal: cfg.FL.NumClients,
+	}
+	const maxAttempts = 30
+	var joinErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		joinErr = remoteClient.Tell(coordinatorAddr, actor.ActorID("coordinator"), joinMsg)
+		if joinErr == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if joinErr != nil {
+		log.Fatalf("[%s] neuspešna registracija kod koordinatora nakon %d pokušaja: %v", id, maxAttempts, joinErr)
+	}
+	fmt.Printf("[%s] registrovan, čekam instrukcije koordinatora...\n", id)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	fmt.Printf("\n[%s] primljen signal za zaustavljanje.\n", id)
+
+	server.Stop()
+	sys.Shutdown()
 }
 
 // featureMean računa prosek po svakom feature-u (za K-Means).

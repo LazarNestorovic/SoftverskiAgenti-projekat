@@ -19,12 +19,12 @@ services:
   coordinator:
     build: .
     container_name: fl-coordinator
-    command: ["./fl-demo", "--config=config.yaml", "--mode=coordinator"]
+    command: ["--config=config.yaml", "--mode=coordinator"]
     ports:
       - "50051:50051"   # gRPC port za komunikaciju sa klijentima
     volumes:
       - ./housing.csv:/app/housing.csv:ro
-      - ./demo/config.yaml:/app/demo/config.yaml:ro
+      - ./demo/config.yaml:/app/config.yaml:ro
     networks:
       - fl-net
     profiles:
@@ -33,7 +33,7 @@ services:
   client-1:
     build: .
     container_name: fl-client-1
-    command: ["./fl-demo", "--config=config.yaml", "--mode=client", "--id=client-1", "--coordinator=coordinator:50051"]
+    command: ["--config=config.yaml", "--mode=client", "--id=client-1", "--coordinator=coordinator:50051"]
     volumes:
       - ./housing.csv:/app/housing.csv:ro
       - ./demo/config.yaml:/app/config.yaml:ro
@@ -47,7 +47,7 @@ services:
   client-2:
     build: .
     container_name: fl-client-2
-    command: ["./fl-demo", "--config=config.yaml", "--mode=client", "--id=client-2", "--coordinator=coordinator:50051"]
+    command: ["--config=config.yaml", "--mode=client", "--id=client-2", "--coordinator=coordinator:50051"]
     volumes:
       - ./housing.csv:/app/housing.csv:ro
       - ./demo/config.yaml:/app/config.yaml:ro
@@ -61,7 +61,7 @@ services:
   client-3:
     build: .
     container_name: fl-client-3
-    command: ["./fl-demo", "--config=config.yaml", "--mode=client", "--id=client-3", "--coordinator=coordinator:50051"]
+    command: ["--config=config.yaml", "--mode=client", "--id=client-3", "--coordinator=coordinator:50051"]
     volumes:
       - ./housing.csv:/app/housing.csv:ro
       - ./demo/config.yaml:/app/config.yaml:ro

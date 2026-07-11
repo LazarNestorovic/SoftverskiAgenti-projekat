@@ -12,6 +12,10 @@ type RemoteActorRef struct {
 	client  *RemoteClient
 }
 
+func NewRemoteActorRef(id actor.ActorID, address string, client *RemoteClient) actor.ActorRef {
+	return &RemoteActorRef{id: id, address: address, client: client}
+}
+
 func (r *RemoteActorRef) ID() actor.ActorID {
 	return r.id
 }
