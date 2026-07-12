@@ -12,7 +12,9 @@ import (
 	"time"
 
 	actor "agentskiSistemi/actor-framework"
+	"agentskiSistemi/actor-framework/cluster"
 	"agentskiSistemi/actor-framework/remote"
+	"agentskiSistemi/actor-framework/supervision"
 	flactors "agentskiSistemi/federated-learning/actors"
 	"agentskiSistemi/federated-learning/data"
 	"agentskiSistemi/federated-learning/model"
@@ -78,7 +80,7 @@ func runLocal(cfg *Config) {
 		Epochs:       cfg.FL.Epochs,
 		DoneCh:       doneCh,
 	}
-	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures, nil)
+	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures, nil, nil)
 	coordinatorRef := sys.Spawn(
 		coordActor,
 		"coordinator",
@@ -96,12 +98,14 @@ func runLocal(cfg *Config) {
 
 	// ── 7. Spawn klijenata ─────────────────────────────────────────────────────
 	clientRefs := make([]actor.ActorRef, cfg.FL.NumClients)
+	clientStrategy := supervision.NewSupervisor(supervision.NewOneForOne(3, 30*time.Second, nil))
 	for i, partition := range partitions {
 		X, y := data.ToMatrices(partition)
 		id := fmt.Sprintf("client-%d", i+1)
-		clientRefs[i] = sys.Spawn(
+		clientRefs[i] = sys.SpawnWithSupervisor(
 			flactors.NewClientActor(id, X, y, aggregatorRef),
 			id,
+			clientStrategy,
 		)
 		fmt.Printf("  [%s] spawned — %d uzoraka\n", id, len(X))
 	}
@@ -171,14 +175,34 @@ func runCoordinator(cfg *Config, listenAddr string) {
 	doneCh := make(chan struct{})
 	remoteClient := remote.NewRemoteClient(nil)
 
+	server := remote.NewRemoteServer(sys)
+	if err := server.Start(listenAddr); err != nil {
+		log.Fatalf("greška pokretanja gRPC servera: %v", err)
+	}
+
+	// Gossip-based membership: coordinator prati klijente preko istog gRPC
+	// kanala i otkriva kad neki od njih padne (NodeDead), bez čega bi runda
+	// zauvek čekala LocalUpdate od mrtvog klijenta.
+	transport := remote.NewGrpcGossipTransport(remoteClient, server)
+	advertiseAddr := "coordinator" + listenAddr
+	membership := cluster.NewCluster(3, cluster.NodeID("coordinator"), advertiseAddr, transport)
+
 	coordCfg := flactors.CoordinatorConfig{
 		TotalRounds:  cfg.FL.NumRounds,
 		LearningRate: cfg.FL.LearningRate,
 		Epochs:       cfg.FL.Epochs,
 		DoneCh:       doneCh,
 	}
-	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures, remoteClient)
+	coordActor := flactors.NewCoordinatorActor(coordCfg, data.NumFeatures, remoteClient, membership)
 	coordinatorRef := sys.Spawn(coordActor, "coordinator")
+
+	membership.Watch(func(n *cluster.NodeInfo) {
+		if n.Status == cluster.NodeDead {
+			fmt.Printf("[Coordinator] klijent %s izgleda mrtav (gossip)\n", n.ID)
+			coordinatorRef.Tell(flactors.ClientDown{ClientID: string(n.ID)})
+		}
+	})
+	membership.Start()
 
 	aggregatorRef := sys.Spawn(flactors.NewAggregatorActor(coordinatorRef, cfg.FL.NumClients), "aggregator")
 	monitorRef := sys.Spawn(flactors.NewMonitorActor(coordinatorRef, valX, valY, cfg.FL.ConvergenceThreshold), "monitor")
@@ -187,10 +211,6 @@ func runCoordinator(cfg *Config, listenAddr string) {
 	time.Sleep(100 * time.Millisecond) // daj aktorima da završe OnStart
 	coordinatorRef.Tell(flactors.SetPeers{Aggregator: aggregatorRef, Monitor: monitorRef, ClusterManager: clusterMgrRef})
 
-	server := remote.NewRemoteServer(sys)
-	if err := server.Start(listenAddr); err != nil {
-		log.Fatalf("greška pokretanja gRPC servera: %v", err)
-	}
 	fmt.Printf("[Coordinator] gRPC server sluša na %s, čekam %d klijenata...\n", listenAddr, cfg.FL.NumClients)
 
 	sig := make(chan os.Signal, 1)
@@ -204,6 +224,7 @@ func runCoordinator(cfg *Config, listenAddr string) {
 		fmt.Println("\nPrimljen signal za zaustavljanje.")
 	}
 
+	membership.Stop()
 	server.Stop()
 	sys.Shutdown()
 	fmt.Println("Sistem zaustavljen.")
@@ -252,13 +273,22 @@ func runClient(cfg *Config, id string, coordinatorAddr string, listenPort string
 	sys := actor.NewActorSystem(id)
 	remoteClient := remote.NewRemoteClient(nil)
 	aggregatorRef := remote.NewRemoteActorRef(actor.ActorID("aggregator"), coordinatorAddr, remoteClient)
-	sys.Spawn(flactors.NewClientActor(id, X, y, aggregatorRef), id)
+	clientStrategy := supervision.NewSupervisor(supervision.NewOneForOne(3, 30*time.Second, nil))
+	sys.SpawnWithSupervisor(flactors.NewClientActor(id, X, y, aggregatorRef), id, clientStrategy)
 
 	server := remote.NewRemoteServer(sys)
 	if err := server.Start(listenPort); err != nil {
 		log.Fatalf("greška pokretanja gRPC servera: %v", err)
 	}
 	advertiseAddr := id + listenPort
+
+	// Gossip-based membership: klijent seed-uje coordinator kao poznati peer
+	// (gossip inače nema kome da se javi prvi put) da bi coordinator mogao da
+	// detektuje pad ovog klijenta preko istog gRPC kanala.
+	transport := remote.NewGrpcGossipTransport(remoteClient, server)
+	membership := cluster.NewCluster(3, cluster.NodeID(id), advertiseAddr, transport)
+	membership.Seed(cluster.NodeInfo{ID: "coordinator", Address: coordinatorAddr, Status: cluster.NodeAlive})
+	membership.Start()
 
 	time.Sleep(100 * time.Millisecond) // daj ClientActor-u da završi OnStart
 
@@ -288,6 +318,7 @@ func runClient(cfg *Config, id string, coordinatorAddr string, listenPort string
 	<-sig
 	fmt.Printf("\n[%s] primljen signal za zaustavljanje.\n", id)
 
+	membership.Stop()
 	server.Stop()
 	sys.Shutdown()
 }

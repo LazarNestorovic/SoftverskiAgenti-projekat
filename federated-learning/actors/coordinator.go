@@ -2,6 +2,7 @@ package actors
 
 import (
 	"agentskiSistemi/actor-framework"
+	"agentskiSistemi/actor-framework/cluster"
 	"agentskiSistemi/actor-framework/crdt"
 	"agentskiSistemi/actor-framework/remote"
 	"agentskiSistemi/federated-learning/model"
@@ -31,19 +32,21 @@ type CoordinatorActor struct {
 	monitor        actor.ActorRef
 	clusterManager actor.ActorRef
 	remoteClient   *remote.RemoteClient
+	membership     *cluster.Cluster
 	currentRound   int
 	roundStart     time.Time
 	roundCounter   *crdt.GCounter
 	clientSet      *crdt.ORSet[string]
 }
 
-func NewCoordinatorActor(cfg CoordinatorConfig, numFeatures int, remoteClient *remote.RemoteClient) *CoordinatorActor {
+func NewCoordinatorActor(cfg CoordinatorConfig, numFeatures int, remoteClient *remote.RemoteClient, membership *cluster.Cluster) *CoordinatorActor {
 	return &CoordinatorActor{
 		cfg:          cfg,
 		globalModel:  model.New(numFeatures),
 		roundCounter: crdt.NewGCounter("coordinator"),
 		clientSet:    crdt.NewORSet[string](),
 		remoteClient: remoteClient,
+		membership:   membership,
 	}
 }
 
@@ -92,11 +95,26 @@ func (c *CoordinatorActor) Receive(ctx actor.ActorContext, msg actor.Message) {
 		c.clients = append(c.clients, ref)
 		c.clientSet.Add(m.ClientID)
 		fmt.Printf("[Coordinator] klijent %s se registrovao (%s)\n", m.ClientID, m.Address)
+		if c.membership != nil {
+			c.membership.Seed(cluster.NodeInfo{ID: cluster.NodeID(m.ClientID), Address: m.Address, Status: cluster.NodeAlive})
+		}
 		if c.clusterManager != nil {
 			ctx.Send(c.clusterManager, RegisterClient{Ref: ref, FeatureMean: m.FeatureMean, ExpectedTotal: m.ExpectedTotal})
 		}
 		if len(c.clients) >= m.ExpectedTotal {
 			c.startRound(ctx)
+		}
+	case ClientDown:
+		remaining := c.clients[:0]
+		for _, ref := range c.clients {
+			if string(ref.ID()) != m.ClientID {
+				remaining = append(remaining, ref)
+			}
+		}
+		c.clients = remaining
+		fmt.Printf("[Coordinator] klijent %s uklonjen (gossip failure detector)\n", m.ClientID)
+		if c.aggregator != nil {
+			ctx.Send(c.aggregator, RemoveClient{ClientID: m.ClientID})
 		}
 	}
 }

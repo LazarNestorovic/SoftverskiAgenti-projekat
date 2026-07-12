@@ -1,9 +1,10 @@
 package cluster
 
 type Cluster struct {
-	localID NodeID
-	gossip  *GossipProtocol
-	ring    *HashRing
+	localID   NodeID
+	gossip    *GossipProtocol
+	ring      *HashRing
+	listeners []func(*NodeInfo)
 }
 
 func NewCluster(replicas int, localID NodeID, localAddress string, transport GossipTransport) *Cluster {
@@ -16,18 +17,23 @@ func NewCluster(replicas int, localID NodeID, localAddress string, transport Gos
 	localNodeInfo := NodeInfo{localID, localAddress, NodeAlive, 0}
 	gossipProtocol := NewGossipProtocol(&localNodeInfo, transport)
 	ring.Add(localNodeInfo.ID)
+
+	cl := &Cluster{
+		localID: localID,
+		gossip:  gossipProtocol,
+		ring:    ring,
+	}
 	gossipProtocol.onChange = func(node *NodeInfo) {
 		if node.Status == NodeAlive {
 			ring.Add(node.ID)
 		} else if node.Status == NodeDead {
 			ring.Remove(node.ID)
 		}
+		for _, fn := range cl.listeners {
+			fn(node)
+		}
 	}
-	return &Cluster{
-		localID: localID,
-		gossip:  gossipProtocol,
-		ring:    ring,
-	}
+	return cl
 }
 
 func (c *Cluster) Start() { c.gossip.Start() }
@@ -39,4 +45,15 @@ func (c *Cluster) ResponsibleNode(actorID string) NodeID {
 
 func (c *Cluster) IsLocal(actorID string) bool {
 	return c.ring.Get(actorID) == c.localID
+}
+
+func (c *Cluster) Seed(info NodeInfo) {
+	c.gossip.members.Upsert(&info)
+	if info.Status == NodeAlive {
+		c.ring.Add(info.ID)
+	}
+}
+
+func (c *Cluster) Watch(fn func(*NodeInfo)) {
+	c.listeners = append(c.listeners, fn)
 }

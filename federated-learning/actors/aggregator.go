@@ -45,6 +45,14 @@ func (a *AggregatorActor) Receive(ctx actor.ActorContext, msg actor.Message) {
 		if len(a.updates) >= a.numClients {
 			a.aggregate(ctx)
 		}
+	case RemoveClient:
+		if a.numClients > 1 {
+			a.numClients--
+		}
+		fmt.Printf("[Aggregator] klijent %s uklonjen, očekujem %d\n", m.ClientID, a.numClients)
+		if len(a.updates) >= a.numClients {
+			a.aggregate(ctx)
+		}
 	}
 }
 
